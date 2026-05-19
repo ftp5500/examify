@@ -1,12 +1,61 @@
+import uuid
+import secrets
+import string
 from django.db import models
 from django.contrib.auth.models import User
 
-import uuid
+
+class UserProfile(models.Model):
+    """ملف تعريفي لكل مستخدم — يحدد دوره (مدير/معلم)"""
+
+    ROLE_CHOICES = [
+        ('principal', 'مدير مدرسة'),
+        ('teacher', 'معلم'),
+    ]
+
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name='profile'
+    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='teacher')
+    full_name = models.CharField(max_length=200, blank=True)
+    national_id = models.CharField(max_length=20, unique=True)
+    mobile = models.CharField(max_length=20, blank=True)
+    must_change_password = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.full_name or self.user.username} ({self.get_role_display()})"
+
+
+def generate_random_password(length=10):
+    """توليد كلمة مرور عشوائية للمعلمين الجدد"""
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 
 class School(models.Model):
     name = models.CharField(max_length=200)
-    teacher = models.ForeignKey(User, on_delete=models.CASCADE)
+
+    # المدير: مالك المدرسة (واحد فقط)
+    principal = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='managed_schools'
+    )
+
+    # المعلمون: عدة معلمين، ومعلم يمكن يكون في عدة مدارس
+    teachers = models.ManyToManyField(
+        User,
+        related_name='teaching_schools',
+        blank=True
+    )
+
+    # معلومات إضافية للتقارير
+    education_directorate = models.CharField(max_length=200, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return self.name

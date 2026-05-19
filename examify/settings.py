@@ -126,3 +126,16 @@ STATIC_URL = 'static/'
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:3000',
 ]
+
+# ============== إعدادات الإيميل ==============
+# للتطوير: الإيميل يطبع في console (مو لازم SMTP حقيقي)
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+DEFAULT_FROM_EMAIL = 'Examify <noreply@examify.sa>'
+
+# لاحقاً للإنتاج: استبدلها بـ Gmail/SendGrid/Mailgun
+# EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+# EMAIL_HOST = 'smtp.gmail.com'
+# EMAIL_PORT = 587
+# EMAIL_USE_TLS = True
+# EMAIL_HOST_USER = 'your-email@gmail.com'
+# EMAIL_HOST_PASSWORD = 'app-password-here'
