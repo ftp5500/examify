@@ -1,0 +1,31 @@
+# البيئة الافتراضية
+.venv/
+venv/
+env/
+
+# قاعدة البيانات (لا ترفعها — سيعملها migrate في الجهاز الجديد)
+db.sqlite3
+*.sqlite3
+
+# ملفات Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ملفات النظام
+.DS_Store
+*.swp
+*.swo
+
+# إعدادات IDE
+.idea/
+.vscode/
+*.iml
+
+# ملفات حساسة
+.env
+local_settings.py
+
+# ملفات الـ migrations لا تحذفها! يجب رفعها

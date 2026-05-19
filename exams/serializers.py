@@ -31,9 +31,9 @@ class ExamSerializer(serializers.ModelSerializer):
     class Meta:
         model = Exam
         fields = [
-            'id', 'title', 'subject', 'grade', 'section', 'school',
-            'academic_year', 'exam_date', 'num_questions', 'num_choices',
-            'questions',
+            'id', 'title', 'subject', 'grade', 'section', 'sections_list',
+            'school', 'academic_year', 'semester', 'period',
+            'exam_date', 'num_questions', 'num_choices', 'questions',
         ]
 
 

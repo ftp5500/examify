@@ -77,16 +77,18 @@ class Student(models.Model):
 
 class Exam(models.Model):
     teacher = models.ForeignKey(User, on_delete=models.CASCADE)
-    school = models.ForeignKey(School, on_delete=models.CASCADE, null=True, blank=True)
+    school = models.ForeignKey(School, on_delete=models.CASCADE, null=True)
     title = models.CharField(max_length=200)
     subject = models.CharField(max_length=100)
     grade = models.CharField(max_length=20, blank=True)
     section = models.CharField(max_length=20, blank=True)
-    academic_year = models.CharField(max_length=20, blank=True, default='1447/1448')
+    sections_list = models.JSONField(default=list, blank=True)   # ← جديد
+    academic_year = models.CharField(max_length=20, default='1447/1448')
+    semester = models.CharField(max_length=10, blank=True)       # ← جديد
+    period = models.CharField(max_length=20, blank=True)         # ← جديد
     exam_date = models.DateField(null=True, blank=True)
     num_questions = models.IntegerField(default=20)
     num_choices = models.IntegerField(default=4)
-    created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return self.title
