@@ -45,7 +45,7 @@ class AnswerSheetSerializer(serializers.ModelSerializer):
         model = AnswerSheet
         fields = [
             'id', 'exam', 'student', 'student_name', 'student_id_number',
-            'barcode', 'status', 'score', 'answers',
+            'barcode', 'status', 'score', 'answers', 'sheet_image',
         ]
 
 

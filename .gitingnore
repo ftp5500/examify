@@ -29,3 +29,19 @@ __pycache__/
 local_settings.py
 
 # ملفات الـ migrations لا تحذفها! يجب رفعها
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Django
+db.sqlite3
+*.log
+media/
+
+# macOS
+.DS_Store

@@ -1,229 +1,285 @@
 import cv2
 import numpy as np
-from pyzbar.pyzbar import decode
-from itertools import combinations
+
+IDX_TO_LATIN = ['A', 'B', 'C', 'D', 'E']
 
 
-def process_answer_sheet(image_path, num_questions, num_choices):
-    img = cv2.imread(image_path)
-    if img is None:
-        return None, {}, 0
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = deskew(gray)
-    barcode = read_barcode(gray)
-    answers, confidence = detect_answers_hough(gray, num_questions, num_choices)
-    return barcode, answers, confidence
-
-
-def deskew(gray):
-    coords = np.column_stack(np.where(gray < 200))
-    if len(coords) < 100:
-        return gray
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle < -45:
-        angle = 90 + angle
-    if abs(angle) < 0.5:
-        return gray
-    h, w = gray.shape
-    M = cv2.getRotationMatrix2D((w // 2, h // 2), -angle, 1.0)
-    return cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_CUBIC,
-                          borderMode=cv2.BORDER_REPLICATE)
-
+# ══════════════════════════════════════════════════
+#  قراءة الباركود
+# ══════════════════════════════════════════════════
 
 def read_barcode(gray):
-    barcodes = decode(gray)
-    if barcodes:
-        return barcodes[0].data.decode('utf-8')
+    try:
+        from pyzbar.pyzbar import decode
+        for d in decode(gray):
+            return d.data.decode('utf-8')
+    except Exception:
+        pass
     return None
 
 
-def pick_best_bubbles(half, num_choices, expected_gap=None, anchor_x=None):
-    if len(half) == num_choices:
-        return half
-    best = None
-    best_score = float('inf')
-    for combo in combinations(half, num_choices):
-        xs = sorted([c[0] for c in combo])
-        gaps = [xs[i+1] - xs[i] for i in range(len(xs)-1)]
-        avg_gap = sum(gaps) / len(gaps)
-        variance = sum((g - avg_gap) ** 2 for g in gaps)
-        if expected_gap:
-            variance += (avg_gap - expected_gap) ** 2 * 0.5
-        if anchor_x is not None:
-            variance += (xs[0] - anchor_x) ** 2 * 0.3
-        if variance < best_score:
-            best_score = variance
-            best = sorted(combo, key=lambda c: c[0])
-    return best
+# ══════════════════════════════════════════════════
+#  تصحيح الصورة
+# ══════════════════════════════════════════════════
+
+def _order_pts(pts):
+    pts  = pts.reshape(4, 2).astype(np.float32)
+    s, d = pts.sum(axis=1), np.diff(pts, axis=1)
+    return np.array([
+        pts[np.argmin(s)],
+        pts[np.argmin(d)],
+        pts[np.argmax(d)],
+        pts[np.argmax(s)],
+    ], dtype=np.float32)
 
 
-def detect_answers_hough(gray, num_questions, num_choices):
-    h, w = gray.shape
-    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+def correct_image(gray):
+    """
+    يصحح الانحراف والتشوه.
+    يجرب كشف حدود الورقة أولاً، ثم resize بسيط.
+    """
+    h, w  = gray.shape
+    STD_W = int(595 * 2)   # 1190
+    STD_H = int(842 * 2)   # 1684
+
+    # ── محاولة 1: كشف الإطار الخارجي للورقة ──
+    try:
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges   = cv2.Canny(blurred, 30, 100)
+        kernel  = np.ones((5, 5), np.uint8)
+        edges   = cv2.dilate(edges, kernel)
+
+        contours, _ = cv2.findContours(
+            edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        candidates = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 0.25 * h * w:
+                continue
+            approx = cv2.approxPolyDP(
+                cnt, 0.02 * cv2.arcLength(cnt, True), True
+            )
+            if len(approx) == 4:
+                candidates.append((area, approx))
+
+        if candidates:
+            _, best = max(candidates, key=lambda x: x[0])
+            pts = _order_pts(best)
+            dst = np.float32([
+                [0, 0], [STD_W, 0], [0, STD_H], [STD_W, STD_H]
+            ])
+            M = cv2.getPerspectiveTransform(pts, dst)
+            return cv2.warpPerspective(gray, M, (STD_W, STD_H))
+    except Exception:
+        pass
+
+    # ── محاولة 2: resize مع تصحيح النسبة ──
+    ar_a4 = 595.0 / 842.0
+    ar    = w / h
+    if ar > ar_a4:
+        nw    = int(h * ar_a4)
+        x_off = (w - nw) // 2
+        gray  = gray[:, x_off: x_off + nw]
+    else:
+        nh    = int(w / ar_a4)
+        y_off = (h - nh) // 2
+        gray  = gray[y_off: y_off + nh, :]
+
+    return cv2.resize(gray, (STD_W, STD_H))
+
+
+# ══════════════════════════════════════════════════
+#  كشف الدوائر (HoughCircles)
+# ══════════════════════════════════════════════════
+
+def detect_bubbles(warped, num_choices):
+    """
+    يكشف دوائر الإجابات بـ HoughCircles.
+    يستبعد منطقة الترويسة (أعلى 25%) ومنطقة QR.
+    """
+    h, w  = warped.shape
     scale = w / 595.0
-    expected_r = int(7 * scale)
-    expected_gap = int(26 * scale)
-    mid_x = w // 2
-    grid_top = int(h * 0.27)
-    grid_bottom = int(h * 0.88)
+    blur  = cv2.GaussianBlur(warped, (5, 5), 0)
 
-    circles_raw = cv2.HoughCircles(
-        blurred, cv2.HOUGH_GRADIENT, dp=1,
-        minDist=int(15 * scale),
-        param1=30, param2=12,
-        minRadius=expected_r - 15,
-        maxRadius=expected_r + 20
+    circles = cv2.HoughCircles(
+        blur,
+        cv2.HOUGH_GRADIENT,
+        dp        = 1,
+        minDist   = int(12 * scale),
+        param1    = 50,
+        param2    = 16,
+        minRadius = int(5  * scale),
+        maxRadius = int(12 * scale),
     )
 
-    if circles_raw is None:
-        return {}, 0
+    if circles is None:
+        return None
 
-    all_circles = [(int(x), int(y), int(r))
-                   for x, y, r in np.round(circles_raw[0]).astype("int")
-                   if grid_top < y < grid_bottom]
+    circles = np.round(circles[0]).astype(int)
 
-    # تجميع في صفوف
-    bubbles = sorted(all_circles, key=lambda b: (round(b[1] / 60) * 60, b[0]))
-    rows = []
-    current_row = []
-    last_y = -999
+    # ── استبعاد منطقة الترويسة والتعليمات (أعلى 25%) ──
+    grid_start_y = int(h * 0.25)
+    circles = [c for c in circles if c[1] > grid_start_y]
 
-    for b in bubbles:
-        if abs(b[1] - last_y) < 50:
-            current_row.append(b)
-        else:
-            if current_row:
-                rows.append(sorted(current_row, key=lambda c: c[0]))
-            current_row = [b]
-            last_y = b[1]
-    if current_row:
-        rows.append(sorted(current_row, key=lambda c: c[0]))
+    # ── استبعاد منطقة QR ──
+    qr_x = int(w * 0.22)
+    qr_y = int(h * 0.24)
+    circles = [c for c in circles
+               if not (c[0] < qr_x and c[1] < qr_y)]
 
-    # حساب المرجعيات
-    actual_gap = expected_gap
-    anchor_left = None
-    anchor_right = None
+    return circles if circles else None
 
-    for row in rows:
-        lh = [c for c in row if c[0] < mid_x]
-        rh = [c for c in row if c[0] >= mid_x]
-        if len(lh) == num_choices and anchor_left is None:
-            xs = sorted([c[0] for c in lh])
-            gaps = [xs[i+1]-xs[i] for i in range(len(xs)-1)]
-            actual_gap = sum(gaps) / len(gaps)
-            anchor_left = xs[0]
-        if len(rh) == num_choices and anchor_right is None:
-            anchor_right = sorted([c[0] for c in rh])[0]
 
-    questions_per_col = -(-num_questions // 2)
+# ══════════════════════════════════════════════════
+#  ترتيب الدوائر وقياس التظليل
+# ══════════════════════════════════════════════════
 
-    # تقسيم لعمودين
-    left = []
-    right = []
+def grade_by_circles(warped, circles, num_questions, num_choices):
+    """
+    يفصل العمودين أولاً ثم يجمع صفوف كل عمود على حدة.
+    الخيارات من اليمين للشمال: أ=يمين، د=يسار
+    """
+    h, w  = warped.shape
+    avg_r = int(np.median([c[2] for c in circles]))
+    mid_x = w / 2
 
-    for row in rows:
-        lh = sorted([c for c in row if c[0] < mid_x], key=lambda c: c[0])
-        rh = sorted([c for c in row if c[0] >= mid_x], key=lambda c: c[0])
+    # ── فصل العمودين بناءً على x ──
+    right_circles = [c for c in circles if c[0] > mid_x]
+    left_circles  = [c for c in circles if c[0] <= mid_x]
 
-        if len(lh) >= num_choices:
-            best = pick_best_bubbles(lh, num_choices, actual_gap, anchor_left)
-            if best:
-                left.append(best)
+    def cluster(bubble_list):
+        if not bubble_list:
+            return []
+        sorted_y = sorted(bubble_list, key=lambda c: c[1])
+        gap      = avg_r * 1.8   # فاصل آمن بين الصفوف
+        rows     = []
+        current  = [sorted_y[0]]
+        for c in sorted_y[1:]:
+            if abs(c[1] - np.mean([r[1] for r in current])) < gap:
+                current.append(c)
+            else:
+                rows.append(current)
+                current = [c]
+        rows.append(current)
+        return rows
 
-        if len(rh) >= num_choices:
-            best = pick_best_bubbles(rh, num_choices, actual_gap, anchor_right)
-            if best:
-                right.append(best)
+    # ── clustering لكل عمود على حدة ──
+    right_rows = cluster(right_circles)
+    left_rows  = cluster(left_circles)
 
-    left.sort(key=lambda r: r[0][1])
-    right.sort(key=lambda r: r[0][1])
+    # ── تصفية الصفوف الصالحة ──
+    def valid(rows):
+        return sorted(
+            [r for r in rows if abs(len(r) - num_choices) <= 1],
+            key=lambda r: np.mean([c[1] for c in r])
+        )
 
-    # استرداد الصف المفقود بالموضع المتوقع
-    for col_rows, anchor_x in [(left, anchor_left), (right, anchor_right)]:
-        if len(col_rows) < questions_per_col and len(col_rows) >= 2 and anchor_x:
-            ys = [r[0][1] for r in col_rows]
-            spacings = [ys[i+1]-ys[i] for i in range(len(ys)-1)]
-            avg_spacing = sum(spacings) / len(spacings)
+    right_valid = valid(right_rows)
+    left_valid  = valid(left_rows)
 
-            # إيجاد الموضع المفقود
-            missing_y = None
-            missing_idx = len(col_rows)  # افتراضياً في النهاية
+    q_per_col = (num_questions + 1) // 2
+    all_rows  = right_valid[:q_per_col] + left_valid[:q_per_col]
+    all_rows  = all_rows[:num_questions]
 
-            for i in range(len(ys)-1):
-                if spacings[i] > avg_spacing * 1.6:
-                    missing_y = int(ys[i] + avg_spacing)
-                    missing_idx = i + 1
-                    break
+    if not all_rows:
+        return {}
 
-            if missing_y is None:
-                missing_y = int(ys[-1] + avg_spacing)
-
-            # ابحث في الدوائر الأصلية عن دوائر قريبة من الموضع المتوقع
-            nearby = [c for c in all_circles
-                      if abs(c[1] - missing_y) < 60
-                      and (c[0] < mid_x if anchor_x < mid_x else c[0] >= mid_x)]
-
-            if len(nearby) >= num_choices:
-                best = pick_best_bubbles(
-                    sorted(nearby, key=lambda c: c[0]),
-                    num_choices, actual_gap, anchor_x
-                )
-                if best:
-                    col_rows.insert(missing_idx, best)
-            elif anchor_x:
-                # أنشئ الصف من الإحداثيات المتوقعة
-                r_default = int(7 * scale)
-                inferred = [(int(anchor_x + j * actual_gap), missing_y, r_default)
-                            for j in range(num_choices)]
-                col_rows.insert(missing_idx, inferred)
-
-    all_rows = [None] * num_questions
-    for i, row in enumerate(left[:questions_per_col]):
-        all_rows[i] = row
-    for i, row in enumerate(right[:questions_per_col]):
-        all_rows[questions_per_col + i] = row
-
-    choices = ['A', 'B', 'C', 'D', 'E'][:num_choices]
+    # ── قياس التظليل وتحديد الإجابات ──
     answers = {}
-    total_conf = 0
+    for idx, row in enumerate(all_rows):
+        q_num = idx + 1
 
-    for q_idx, bubble_row in enumerate(all_rows):
-        if bubble_row is None:
-            answers[str(q_idx + 1)] = None
+        # من اليمين للشمال: أ في اليمين
+        row_sorted = sorted(row[:num_choices], key=lambda c: -c[0])
+
+        if len(row_sorted) < num_choices:
+            answers[str(q_num)] = None
             continue
 
-        darknesses = []
-        for (cx, cy, r) in bubble_row:
-            inner = max(3, int(r * 0.55))
-            x1 = max(0, cx - inner)
-            x2 = cx
-            y1 = max(0, cy - inner)
-            y2 = cy
-            cell = gray[y1:y2, x1:x2]
-            val = float(np.mean(cell)) if cell.size > 0 else 255.0
-            darknesses.append(val)
+        readings = []
+        for cx, cy, r in row_sorted:
+            roi_r = int(r * 1.2)
+            roi   = warped[
+                max(0, cy - roi_r): min(h, cy + roi_r),
+                max(0, cx - roi_r): min(w, cx + roi_r),
+            ]
+            readings.append(float(np.mean(roi)) if roi.size > 0 else 255.0)
 
-        while len(darknesses) < num_choices:
-            darknesses.append(255.0)
+        min_val = min(readings)
+        spread  = max(readings) - min_val
 
-        min_val = min(darknesses)
-        min_idx = darknesses.index(min_val)
-        sorted_d = sorted(darknesses)
-        contrast = sorted_d[1] - sorted_d[0] if len(sorted_d) > 1 else 0
-
-        if contrast > 12 and min_val < 210:
-            answers[str(q_idx + 1)] = choices[min_idx]
-            total_conf += contrast
+        # threshold: spread > 25 و min < 175 (معايرة من بيانات فعلية)
+        if spread > 25 and min_val < 175:
+            answers[str(q_num)] = IDX_TO_LATIN[readings.index(min_val)]
         else:
-            answers[str(q_idx + 1)] = None
+            answers[str(q_num)] = None
 
-    confidence = min(100.0, total_conf / max(num_questions, 1))
-    return answers, round(confidence, 1)
+    return answers
 
+
+# ══════════════════════════════════════════════════
+#  المعالجة الرئيسية
+# ══════════════════════════════════════════════════
+
+def process_answer_sheet(image_path, num_questions, num_choices):
+    """
+    يقرأ ورقة الإجابة ويرجع الإجابات.
+
+    Returns:
+        barcode   (str | None)
+        answers   {'1': 'A', '2': 'B', ...}  — None إذا لم يُجب
+        confidence (float 0-1)
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        return None, {}, 0.0
+
+    # تصحيح الاتجاه
+    if img.shape[1] > img.shape[0]:
+        img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # ── 1. قراءة QR قبل الـ warp ──
+    barcode = read_barcode(gray)
+
+    # ── 2. تصحيح الصورة ──
+    warped = correct_image(gray)
+
+    # ── 3. تحسين التباين ──
+    clahe  = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    warped = clahe.apply(cv2.GaussianBlur(warped, (3, 3), 0))
+
+    # ── 4. كشف الدوائر ──
+    circles = detect_bubbles(warped, num_choices)
+
+    if circles is None or len(circles) < num_questions * num_choices * 0.6:
+        return barcode, {str(i): None for i in range(1, num_questions + 1)}, 0.0
+
+    # ── 5. تحديد الإجابات ──
+    answers    = grade_by_circles(warped, circles, num_questions, num_choices)
+    answered   = sum(1 for v in answers.values() if v is not None)
+    confidence = round(answered / max(num_questions, 1), 2)
+
+    return barcode, answers, confidence
+
+
+# ══════════════════════════════════════════════════
+#  حساب الدرجة
+# ══════════════════════════════════════════════════
 
 def calculate_score(student_answers, correct_answers, total_weight=100):
+    """
+    student_answers: {'1': 'A', '2': None, ...}
+    correct_answers: {'1': 'A', '2': 'C', ...}
+    """
     if not correct_answers:
-        return 0
-    correct = sum(1 for q, a in correct_answers.items()
-                  if student_answers.get(q) == a)
+        return 0.0
+
+    correct = sum(
+        1 for q, ans in correct_answers.items()
+        if student_answers.get(str(q)) == ans
+    )
+
     return round((correct / len(correct_answers)) * total_weight, 1)

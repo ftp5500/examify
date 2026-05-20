@@ -116,6 +116,7 @@ class AnswerSheet(models.Model):
     score = models.FloatField(null=True, blank=True)
     answers = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
+    sheet_image = models.TextField(blank=True, default='')  # debug image base64
 
 class Staff(models.Model):
     ROLE_CHOICES = [

@@ -8,7 +8,7 @@ from .views import (
     generate_sheets, grade_sheet, export_results,
     import_students, import_teachers, list_teachers,
     resend_teacher_credentials, change_password,
-    student_filters, student_details,
+    student_filters, student_details, update_sheet_answers, debug_grade
 )
 
 router = DefaultRouter()
@@ -26,9 +26,13 @@ urlpatterns = [
     path('students/<int:student_id>/details/', student_details, name='student-details'),
     path('teachers/', list_teachers, name='list-teachers'),
     path('teachers/import/', import_teachers, name='import-teachers'),
-    path('teachers/<int:teacher_id>/resend-credentials/', resend_teacher_credentials, name='resend-teacher-credentials'),
+    path('teachers/<int:teacher_id>/resend-credentials/', resend_teacher_credentials,
+         name='resend-teacher-credentials'),
     path('exams/<int:exam_id>/generate/', generate_sheets, name='generate-sheets'),
     path('exams/<int:exam_id>/grade/', grade_sheet, name='grade-sheet'),
     path('exams/<int:exam_id>/export/', export_results, name='export-results'),
     path('', include(router.urls)),
+    path('sheets/<int:sheet_id>/update-answers/', update_sheet_answers, name='update-sheet-answers'),
+    path('exams/<int:exam_id>/debug-grade/', debug_grade, name='debug-grade'),
+
 ]
