@@ -139,3 +139,11 @@ DEFAULT_FROM_EMAIL = 'Examify <noreply@examify.sa>'
 # EMAIL_USE_TLS = True
 # EMAIL_HOST_USER = 'your-email@gmail.com'
 # EMAIL_HOST_PASSWORD = 'app-password-here'
+
+
+
+# ========================= حفظ الصور والملفات =====================
+MEDIA_URL  = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+ANTHROPIC_API_KEY = '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'

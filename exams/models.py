@@ -116,7 +116,7 @@ class AnswerSheet(models.Model):
     score = models.FloatField(null=True, blank=True)
     answers = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
-    sheet_image = models.TextField(blank=True, default='')  # debug image base64
+    sheet_image = models.ImageField(upload_to='sheets/', null=True, blank=True)
 
 class Staff(models.Model):
     ROLE_CHOICES = [
@@ -133,3 +133,51 @@ class Staff(models.Model):
 
     def __str__(self):
         return f"{self.name} - {self.get_role_display()}"
+
+# ══════════════════════════════════════════════════
+#  أضف هذين النموذجين في نهاية exams/models.py
+# ══════════════════════════════════════════════════
+
+class Curriculum(models.Model):
+    STATUS_CHOICES = [
+        ('pending',    'في الانتظار'),
+        ('processing', 'جاري الاستخراج'),
+        ('done',       'مكتمل'),
+        ('error',      'خطأ'),
+    ]
+    title           = models.CharField(max_length=200)
+    subject         = models.CharField(max_length=100)
+    grade           = models.CharField(max_length=20)
+    pdf_file        = models.FileField(upload_to='curricula/')
+    created_by      = models.ForeignKey(User, on_delete=models.CASCADE)
+    created_at      = models.DateTimeField(auto_now_add=True)
+    status          = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    questions_count = models.IntegerField(default=0)
+    error_message   = models.TextField(blank=True)
+    semester = models.CharField(max_length=10, blank=True, default='')
+
+    def __str__(self):
+        return f"{self.title} — {self.subject} ({self.grade})"
+
+
+class BankQuestion(models.Model):
+    DIFFICULTY_CHOICES = [
+        ('easy',   'سهل'),
+        ('medium', 'متوسط'),
+        ('hard',   'صعب'),
+    ]
+    curriculum      = models.ForeignKey(Curriculum, on_delete=models.CASCADE, related_name='questions')
+    subject         = models.CharField(max_length=100)
+    grade           = models.CharField(max_length=20)
+    question_text   = models.TextField()
+    choice_a        = models.CharField(max_length=500)
+    choice_b        = models.CharField(max_length=500)
+    choice_c        = models.CharField(max_length=500)
+    choice_d        = models.CharField(max_length=500, blank=True)
+    correct_answer  = models.CharField(max_length=1)   # A B C D
+    difficulty      = models.CharField(max_length=10, choices=DIFFICULTY_CHOICES, default='medium')
+    topic           = models.CharField(max_length=200, blank=True)
+    created_at      = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.question_text[:60]

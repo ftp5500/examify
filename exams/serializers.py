@@ -3,7 +3,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.db import transaction
-from .models import UserProfile, School, Student, Exam, Question, AnswerSheet
+from .models import UserProfile, School, Student, Exam, Question, AnswerSheet, Curriculum, BankQuestion
 
 
 class SchoolSerializer(serializers.ModelSerializer):
@@ -40,12 +40,21 @@ class ExamSerializer(serializers.ModelSerializer):
 class AnswerSheetSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source='student.name', read_only=True)
     student_id_number = serializers.CharField(source='student.student_id', read_only=True)
+    sheet_image_url = serializers.SerializerMethodField()
+
+    def get_sheet_image_url(self, obj):
+        if obj.sheet_image:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.sheet_image.url)
+            return obj.sheet_image.url
+        return None
 
     class Meta:
         model = AnswerSheet
         fields = [
             'id', 'exam', 'student', 'student_name', 'student_id_number',
-            'barcode', 'status', 'score', 'answers', 'sheet_image',
+            'barcode', 'status', 'score', 'answers', 'sheet_image_url',
         ]
 
 
@@ -123,15 +132,15 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         profile = getattr(user, 'profile', None)
 
         data['user'] = {
-            'id': user.id,
-            'username': user.username,
-            'email': user.email,
-            'full_name': profile.full_name if profile else user.get_full_name(),
-            'role': profile.role if profile else None,
+            'id':                   user.id,
+            'username':             user.username,
+            'email':                user.email,
+            'full_name':            profile.full_name if profile else user.get_full_name(),
+            'role':                 profile.role if profile else None,
             'must_change_password': profile.must_change_password if profile else False,
+            'is_superuser':         user.is_superuser,   # ← هنا
         }
 
-        # إضافة بيانات المدرسة
         school = None
         if profile and profile.role == 'principal':
             school = user.managed_schools.first()
@@ -142,3 +151,16 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             data['school'] = {'id': school.id, 'name': school.name}
 
         return data
+
+
+class CurriculumSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Curriculum
+        fields = ['id', 'title', 'subject', 'grade', 'status', 'questions_count', 'created_at', 'error_message']
+
+
+class BankQuestionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BankQuestion
+        fields = ['id', 'question_text', 'choice_a', 'choice_b', 'choice_c', 'choice_d', 'correct_answer', 'difficulty',
+                  'topic', 'subject', 'grade']

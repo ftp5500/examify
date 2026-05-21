@@ -4,6 +4,7 @@ import tempfile
 import os
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
+from django.core.files.base import ContentFile
 
 from django.http import HttpResponse
 from django.db.models import Q
@@ -23,6 +24,12 @@ from .serializers import (
 )
 from .pdf_generator import generate_answer_sheet
 from .omr_engine import process_answer_sheet, calculate_score
+
+from rest_framework.permissions import BasePermission
+from django.shortcuts import get_object_or_404
+from .models import Curriculum, BankQuestion
+from .serializers import CurriculumSerializer, BankQuestionSerializer
+from .question_extractor import start_extraction
 
 
 # ══════════════════════════════════════════════════
@@ -304,8 +311,10 @@ def grade_sheet(request, exam_id):
                         cv2.circle(debug_img, (cx, cy), r + 4, (0, 255, 0), 3)
 
         # ── تحويل لـ base64 ──
-        _, buf      = cv2.imencode('.jpg', debug_img, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        image_b64   = f"data:image/jpeg;base64,{base64.b64encode(buf).decode('utf-8')}"
+
+        _, buf = cv2.imencode('.jpg', debug_img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        image_b64 = f"data:image/jpeg;base64,{base64.b64encode(buf).decode('utf-8')}"
+        sheet.sheet_image.save(f'{barcode}.jpg', ContentFile(buf.tobytes()), save=False)
 
         # ── قراءة الباركود ──
         if not barcode:
@@ -321,7 +330,7 @@ def grade_sheet(request, exam_id):
         sheet.answers     = answers
         sheet.score       = score
         sheet.status      = 'graded'
-        sheet.sheet_image = image_b64
+
         sheet.save()
 
         return Response({
@@ -1013,3 +1022,175 @@ def debug_grade(request, exam_id):
         })
     finally:
         os.unlink(tmp_path)
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def clear_exam_sheets(request, exam_id):
+    """حذف جميع أوراق الإجابة في اختبار"""
+    exam    = Exam.objects.get(id=exam_id)
+    deleted = AnswerSheet.objects.filter(exam=exam).delete()
+    return Response({'deleted': deleted[0]})
+
+
+
+
+
+class IsSuperAdmin(BasePermission):
+    """فقط superuser يصل لصفحة الأدمن"""
+
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.is_superuser
+
+
+# ── قائمة المناهج / رفع منهج جديد ──
+@api_view(['GET', 'POST'])
+@permission_classes([IsSuperAdmin])
+def curricula_list(request):
+    if request.method == 'GET':
+        data = Curriculum.objects.all().order_by('-created_at')
+        return Response(CurriculumSerializer(data, many=True).data)
+
+    # POST — رفع كتاب جديد
+    title = request.data.get('title', '').strip()
+    subject = request.data.get('subject', '').strip()
+    grade = request.data.get('grade', '').strip()
+    pdf_file = request.FILES.get('pdf_file')
+
+    if not all([title, subject, grade, pdf_file]):
+        return Response({'error': 'جميع الحقول مطلوبة'}, status=400)
+
+    curriculum = Curriculum.objects.create(
+        title=title, subject=subject, grade=grade,
+        pdf_file=pdf_file, created_by=request.user,
+    )
+    return Response(CurriculumSerializer(curriculum).data, status=201)
+
+
+# ── تفاصيل منهج / حذفه ──
+@api_view(['GET', 'DELETE'])
+@permission_classes([IsSuperAdmin])
+def curriculum_detail(request, curriculum_id):
+    curriculum = get_object_or_404(Curriculum, id=curriculum_id)
+
+    if request.method == 'DELETE':
+        curriculum.pdf_file.delete(save=False)
+        curriculum.delete()
+        return Response(status=204)
+
+    return Response(CurriculumSerializer(curriculum).data)
+
+
+# ── بدء استخراج الأسئلة ──
+@api_view(['POST'])
+@permission_classes([IsSuperAdmin])
+def extract_questions_view(request, curriculum_id):
+    curriculum = get_object_or_404(Curriculum, id=curriculum_id)
+
+    if curriculum.status == 'processing':
+        return Response({'error': 'الاستخراج جارٍ بالفعل'}, status=400)
+
+    # حذف الأسئلة القديمة
+    curriculum.questions.all().delete()
+    curriculum.questions_count = 0
+    curriculum.status = 'pending'
+    curriculum.save()
+
+    start_extraction(curriculum.id)
+    return Response({'message': 'بدأ الاستخراج في الخلفية'}, status=202)
+
+
+# ── أسئلة منهج معين (أدمن) ──
+@api_view(['GET'])
+@permission_classes([IsSuperAdmin])
+def curriculum_questions(request, curriculum_id):
+    curriculum = get_object_or_404(Curriculum, id=curriculum_id)
+    qs = curriculum.questions.all()
+
+    # فلاتر
+    search = request.query_params.get('search', '')
+    difficulty = request.query_params.get('difficulty', '')
+    topic = request.query_params.get('topic', '')
+    if search:
+        qs = qs.filter(question_text__icontains=search)
+    if difficulty:
+        qs = qs.filter(difficulty=difficulty)
+    if topic:
+        qs = qs.filter(topic__icontains=topic)
+
+    # pagination
+    page = max(1, int(request.query_params.get('page', 1)))
+    per_page = int(request.query_params.get('per_page', 50))
+    total = qs.count()
+    qs = qs[(page - 1) * per_page: page * per_page]
+
+    return Response({
+        'total': total,
+        'page': page,
+        'per_page': per_page,
+        'questions': BankQuestionSerializer(qs, many=True).data,
+    })
+
+
+# ── تعديل / حذف سؤال (أدمن) ──
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsSuperAdmin])
+def question_admin_detail(request, question_id):
+    q = get_object_or_404(BankQuestion, id=question_id)
+
+    if request.method == 'DELETE':
+        q.delete()
+        return Response(status=204)
+
+    editable = ['question_text', 'choice_a', 'choice_b', 'choice_c',
+                'choice_d', 'correct_answer', 'difficulty', 'topic']
+    for field in editable:
+        if field in request.data:
+            setattr(q, field, request.data[field])
+    q.save()
+    return Response(BankQuestionSerializer(q).data)
+
+
+# ── بنك الأسئلة للمعلم ──
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def bank_questions(request):
+    """يعرض الأسئلة المتاحة للمعلم بحسب المادة والصف"""
+    qs = BankQuestion.objects.filter(curriculum__status='done')
+
+    subject = request.query_params.get('subject', '')
+    grade = request.query_params.get('grade', '')
+    search = request.query_params.get('search', '')
+    difficulty = request.query_params.get('difficulty', '')
+    topic = request.query_params.get('topic', '')
+
+    if subject:
+        qs = qs.filter(subject=subject)
+    if grade:
+        qs = qs.filter(grade=grade)
+    if search:
+        qs = qs.filter(question_text__icontains=search)
+    if difficulty:
+        qs = qs.filter(difficulty=difficulty)
+    if topic:
+        qs = qs.filter(topic__icontains=topic)
+
+    page = max(1, int(request.query_params.get('page', 1)))
+    per_page = int(request.query_params.get('per_page', 50))
+    total = qs.count()
+    qs = qs[(page - 1) * per_page: page * per_page]
+
+    # الموضوعات المتاحة
+    topics = list(
+        BankQuestion.objects.filter(curriculum__status='done')
+        .values_list('topic', flat=True)
+        .distinct()
+        .exclude(topic='')[:100]
+    )
+
+    return Response({
+        'total': total,
+        'page': page,
+        'per_page': per_page,
+        'topics': topics,
+        'questions': BankQuestionSerializer(qs, many=True).data,
+    })
